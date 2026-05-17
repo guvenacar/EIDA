@@ -1,0 +1,475 @@
+%% IACR ePrint submission
+%% To compile with the official IACR template, replace this line with:
+%%   \documentclass{iacrtrans}
+%% and download iacrtrans.cls from https://github.com/IACR/latex
+%% This file compiles with standard LaTeX as-is.
+\documentclass[11pt,a4paper]{article}
+
+% ─── Packages ──────────────────────────────────────────────────────────────
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{amsmath}
+\usepackage{amssymb}
+
+\usepackage{graphicx}
+\usepackage{mdframed}
+
+% ─── Listings style (protocol / pseudocode blocks) ─────────────────────────
+\lstdefinestyle{protocol}{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  frame=single,
+  framerule=0.4pt,
+  rulecolor=\color{gray!60},
+  backgroundcolor=\color{gray!6},
+  xleftmargin=1em,
+  xrightmargin=0.5em,
+  aboveskip=0.8em,
+  belowskip=0.8em,
+  columns=fullflexible,
+  keepspaces=true,
+  literate={→}{{$\rightarrow$}}1
+           {−}{{$-$}}1
+           {≤}{{$\leq$}}1
+}
+
+% ─── Architectural note box ────────────────────────────────────────────────
+\newmdenv[
+  linecolor=blue!40,
+  backgroundcolor=blue!4,
+  linewidth=1pt,
+  leftmargin=0pt,
+  rightmargin=0pt,
+  innerleftmargin=8pt,
+  innerrightmargin=8pt,
+  innertopmargin=6pt,
+  innerbottommargin=6pt,
+  skipabove=\medskipamount,
+  skipbelow=\medskipamount
+]{archbox}
+
+% ─── Metadata ──────────────────────────────────────────────────────────────
+\title{EIDA: Ephemeral Identity Distribution Architecture\\[0.4em]\large\textit{Whitepaper v1.4}}
+
+\author{Güven Acar}
+\date{May 2026}
+
+\begin{document}
+
+\maketitle
+
+% ═══════════════════════════════════════════════════════════════════════════
+\begin{abstract}
+Classical Public Key Infrastructure (PKI) provides static identity
+guarantees---it proves that a public key belongs to an entity, but cannot
+guarantee that a given transaction originates from that entity at that
+moment.  This gap enables replay attacks, key-reuse vulnerabilities, and
+long-term compromise cascades.
+
+EIDA (Ephemeral Identity Distribution Architecture) addresses this gap by
+introducing \emph{identity-level forward secrecy}.  The core primitive,
+\textbf{ePriPub}, is a single-use ephemeral key pair derived per transaction
+from the user's permanent identity inside a hardware-backed isolation zone
+(TPM~2.0 / TEE).  Once used, the ePriPub components are destroyed and the
+Certificate Authority (CA) issues a fresh single-use certificate---no
+persistent state is required.
+
+EIDA shifts the trust model from centralised authority verification to
+cryptographic transaction uniqueness, distributing security to the user
+without requiring trusted intermediaries.
+\end{abstract}
+
+\noindent\textbf{Keywords:} ephemeral keys, forward secrecy, PKI, hardware security, replay protection, identity architecture
+
+% ═══════════════════════════════════════════════════════════════════════════
+\section{Problem}
+
+Today, companies responsible for securing user identities are under constant
+attack.  A single breach of a centralised security system can expose the
+personal data of millions of users.  This is an inevitable consequence of the
+current architecture: security is concentrated, and concentration creates
+high-value targets.
+
+EIDA proposes distributing this responsibility to user devices.  In a
+decentralised model, an attacker who compromises a single node gains access to
+only one person's data---not millions.  Large technology companies are no
+longer the primary target.  The attack surface shrinks from a single critical
+system to millions of individual devices.
+
+Classical PKI reinforces this centralisation problem.  It guarantees that a
+public key belongs to an entity, but cannot verify that a specific transaction
+originates from that entity at that moment---enabling replay attacks, key
+reuse, and long-term compromise cascades.
+
+% ═══════════════════════════════════════════════════════════════════════════
+\section{Architecture}
+
+EIDA consists of three layers.
+
+\paragraph{1.~User Isolation Zone.}
+The user's permanent private key (\texttt{uPriv}) resides exclusively within
+a hardware-backed isolation zone (TPM~2.0 / TEE).  It never leaves this
+environment under any circumstance.  All cryptographic operations involving
+\texttt{uPriv} are performed inside the zone.
+
+\paragraph{2.~ePriPub Derivation Layer.}
+For each transaction, a single-use ephemeral key pair is derived inside the
+isolation zone:
+\begin{lstlisting}[style=protocol]
+uPriv + nonce + timestamp → HKDF → seed → Ed25519 → (ePriv, ePub)
+\end{lstlisting}
+The nonce is randomly generated per transaction and combined with a
+timestamp, guaranteeing that no two derivations produce the same key pair.
+Transaction uniqueness is ensured by the \texttt{(ePub, nonce, timestamp)}
+triple---no external token coordinator is required.
+
+\paragraph{3.~Stateless CA Layer.}
+The CA operates as a reactive signer---it does not scan, store, or track
+previous requests.  Each incoming request is treated as a self-contained,
+atomic unit:
+\begin{lstlisting}[style=protocol]
+Receive:  (ePub + nonce + timestamp + signature)
+Verify:   signature valid?        → yes
+          timestamp within TTL?   → yes
+Generate: new (sPriv, sPub) key pair
+Issue:    sCert = {sPub + expiry + metadata}, signed with CA key
+Send:     (sCert + signed document) to user isolation zone
+Forget:   sPriv destroyed, no state retained
+\end{lstlisting}
+The CA does not maintain a burned list or any persistent record of processed
+requests.  Replay protection is provided by the short TTL window and the
+inherent single-use nature of \texttt{sCert}.  This stateless design enables
+unlimited horizontal scaling---each CA node operates independently without
+database synchronisation.
+
+% ═══════════════════════════════════════════════════════════════════════════
+\section{Scalability Model: Stateless Verification and the End of Revocation
+  Lists}
+\label{sec:scalability}
+
+\subsection{The Legacy Bottleneck}
+
+Traditional PKI and identity systems suffer from what can be termed the
+\emph{State Exhaustion Problem}.  To ensure that a token or key has not been
+reused or compromised, a Certificate Authority must maintain large,
+continuously growing Certificate Revocation Lists (CRLs) or respond to
+real-time status queries (OCSP\@).  This creates a single point of latency
+and a database overhead that scales poorly as user populations grow into the
+hundreds of millions.
+
+\subsection{The EIDA Model: Zero-State Scalability}
+
+EIDA eliminates the need for a burned list or any centralised database lookup
+during verification.  Rather than scaling the CA's state-management capacity,
+EIDA moves the burden of security from the CA to \emph{time} and
+\emph{hardware}.
+
+\paragraph{1.~Hardware-Enforced Ephemerality.}
+The ePriPub pair is generated inside a hardware-backed isolation zone
+(TPM/TEE) and is strictly bound to a single transaction context.  The key
+pair ceases to exist on the client side immediately after signing---not by
+policy, but by design.  There is nothing to revoke because there is nothing to
+persist.
+
+\paragraph{2.~Temporal Auto-Invalidation.}
+Every EIDA token is cryptographically bound to a high-precision timestamp.
+The CA does not revoke keys; it simply rejects any request where
+\[
+  T_{\text{current}} - T_{\text{token}} > \mathit{TTL}.
+\]
+Invalidation is a mathematical consequence of time, not a database operation.
+
+\paragraph{3.~$O(1)$ Verification Complexity.}
+The CA performs a purely mathematical verification: it checks the signature
+and the clock.  No database is queried, no list is consulted.  Verification
+complexity is $O(1)$---the operation takes the same time whether the system
+serves $10^{2}$ or $10^{11}$ users.
+
+\begin{archbox}
+\textbf{Architectural Note.}~~In EIDA, security is not a record maintained in
+a database---it is a property of the mathematics and the hardware.  The CA
+functions as a \emph{stateless gatekeeper}, making the system structurally
+immune to the scalability bottlenecks that constrain modern PKI deployments.
+\end{archbox}
+
+% ═══════════════════════════════════════════════════════════════════════════
+\section{ePriPub --- Ephemeral Primary Public Key Primitive}
+
+ePriPub is the core primitive of EIDA.  It is not a protocol---it is a
+single-use cryptographic identity unit that carries both signing and
+verification capability for exactly one transaction.
+
+\subsection{Definition}
+
+ePriPub is an ephemeral key pair $(\mathit{ePriv},\,\mathit{ePub})$ where:
+\begin{itemize}
+  \item $\mathit{ePriv}$ --- ephemeral private component, used once to sign
+        the consent token, destroyed immediately after.
+  \item $\mathit{ePub}$ --- ephemeral public component, sent to the CA for
+        signature verification, discarded after use.
+\end{itemize}
+Neither component is stored anywhere after the transaction completes.
+
+\subsection{Derivation}
+
+\begin{lstlisting}[style=protocol]
+Inputs:
+  uPriv     — permanent user private key (never leaves isolation zone)
+  nonce     — 32-byte cryptographically random value (per transaction)
+  timestamp — Unix timestamp in milliseconds (per transaction)
+
+Process:
+  seed           = HKDF(uPriv || nonce || timestamp)   [RFC 5869]
+  (ePriv, ePub)  = Ed25519_derive(seed)                [RFC 8032]
+
+Output:
+  (ePriv, ePub)  — valid for this transaction only
+\end{lstlisting}
+
+\subsection{Lifecycle}
+
+\begin{lstlisting}[style=protocol]
+ 1. DERIVE   — (ePriv, ePub) generated inside isolation zone
+ 2. SIGN     — consent token (ePub + nonce + timestamp) signed with ePriv
+ 3. TRANSMIT — (ePub + nonce + timestamp + signature) sent to CA
+ 4. VERIFY   — CA verifies signature and timestamp TTL
+ 5. DESTROY  — ePriv destroyed inside isolation zone
+ 6. GENERATE — CA generates new session key pair (sPriv, sPub)
+ 7. SIGN-DOC — CA signs document with sPriv, issues sCert
+ 8. RESPOND  — (sCert + signed document) sent to user isolation zone
+ 9. FORWARD  — isolation zone forwards to requesting institution
+10. CLEAN    — sPriv destroyed by CA
+\end{lstlisting}
+
+\subsection{Security Properties}
+
+\begin{itemize}
+  \item \textbf{Single-use} --- \texttt{sCert} expires after TTL; replay
+        attacks are blocked by the timestamp.
+  \item \textbf{Identity-bound} --- the derivation chain links ePriPub to
+        \texttt{uPriv} without exposing it.
+  \item \textbf{Forward secrecy} --- compromise of any ePriPub reveals
+        nothing about \texttt{uPriv} or other transactions.
+  \item \textbf{Stateless CA} --- the CA retains no state between requests,
+        enabling unlimited horizontal scaling.
+\end{itemize}
+
+\subsection{ePriPub as User Consent Proof}
+
+In classical e-signature models, the user directly signs the document with
+their private key.  EIDA separates this into two distinct responsibilities:
+
+\begin{lstlisting}[style=protocol]
+User  → proves consent    (ePriPub)
+CA    → signs document    (sPriv)
+\end{lstlisting}
+
+The CA generates a session key pair $(\mathit{sPriv},\,\mathit{sPub})$ once
+per transaction and handles the actual document signature.  However, the CA
+will only proceed with signing if a valid, unused ePriPub is present in the
+request.  Therefore ePriPub serves as a \textbf{cryptographic consent token}:
+
+\begin{lstlisting}[style=protocol]
+Valid ePriPub received → user consented  → CA signs and issues sCert
+No ePriPub            → no consent proof → CA rejects
+Expired timestamp     → TTL window past  → CA rejects
+\end{lstlisting}
+
+\paragraph{Non-repudiation guarantee.}
+The user cannot later deny having initiated the transaction because:
+\begin{itemize}
+  \item ePriPub is derived from \texttt{uPriv}---only the user could have
+        produced it.
+  \item ePriPub is single-use---it cannot have been captured and replayed.
+  \item The \texttt{(ePub, nonce, timestamp)} combination is unique---it
+        cannot be reused in another context.
+\end{itemize}
+The CA cannot forge user consent because it cannot produce a valid ePriPub
+without access to \texttt{uPriv}, and \texttt{uPriv} never leaves the user's
+isolation zone.
+
+% ═══════════════════════════════════════════════════════════════════════════
+\section{Security Analysis}
+
+\subsection{Threat Model}
+
+EIDA considers the following adversaries:
+\begin{itemize}
+  \item \textbf{Network attacker} --- intercepts transmitted data.
+  \item \textbf{CA attacker} --- compromises the certificate authority.
+  \item \textbf{Device attacker} --- gains physical or logical access to the
+        user's device.
+  \item \textbf{Replay attacker} --- attempts to reuse captured transactions.
+\end{itemize}
+
+\subsection{Attack Scenarios}
+
+\paragraph{Network interception.}
+\begin{lstlisting}[style=protocol]
+Attacker captures: (ePub + nonce + timestamp + signature)
+Replay attempt   → CA rejects: timestamp TTL already expired
+uPriv            → never transmitted → not exposed
+Result: attack fails
+\end{lstlisting}
+
+\paragraph{CA compromise.}
+\begin{lstlisting}[style=protocol]
+Attacker gains access to CA
+CA stores: no persistent user data, no burned list
+sPriv    → destroyed after each transaction → not recoverable
+uPriv    → never reaches CA → not exposed
+Result: attacker finds nothing of value
+\end{lstlisting}
+
+\paragraph{Device compromise.}
+\begin{lstlisting}[style=protocol]
+Attacker gains access to user device
+uPriv            → inside TPM/TEE → cannot be extracted
+Past ePriPub     → destroyed → not recoverable
+Result: attacker limited to future transactions
+        only while physically holding the device
+\end{lstlisting}
+
+\paragraph{Replay attack.}
+\begin{lstlisting}[style=protocol]
+Attacker captures valid (ePub + nonce + timestamp + signature)
+CA checks timestamp → TTL window expired → rejected
+Even within TTL: sCert already delivered and consumed by institution
+Institution validates sCert expiry → rejected
+Result: attack fails
+\end{lstlisting}
+
+\subsection{Limitations}
+
+\begin{itemize}
+  \item EIDA does not protect against physical device seizure where the TPM is
+        bypassed at the hardware level.
+  \item EIDA does not provide anonymity---\texttt{uPriv} is permanently linked
+        to user identity.
+  \item EIDA does not address CA availability---a downed CA blocks
+        transactions.
+\end{itemize}
+
+% ═══════════════════════════════════════════════════════════════════════════
+\section{Comparison with Existing Approaches}
+
+\subsection{Classical PKI}
+
+\begin{table}[ht]
+\centering
+\caption{EIDA vs.\ Classical PKI}
+\label{tab:pki}
+\begin{tabular}{lll}
+  \toprule
+  \textbf{Property}       & \textbf{Classical PKI} & \textbf{EIDA}      \\
+  \midrule
+  Identity guarantee      & Static                 & Per-transaction    \\
+  Key reuse               & Yes                    & Never              \\
+  \texttt{uPriv} exposure & High                   & None               \\
+  Replay protection       & External               & Native             \\
+  CA breach impact        & Critical               & Minimal            \\
+  Forward secrecy         & Session-level          & Identity-level     \\
+  Centralisation          & High                   & None               \\
+  \bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{TLS Ephemeral Keys (TLS 1.3)}
+
+TLS~1.3~\cite{RFC8446} introduces ephemeral session keys for forward
+secrecy.  However, ephemeral keys apply to the \emph{session} layer, not the
+identity layer.  The server certificate remains static and is reused across
+all sessions; compromise of that certificate affects all past and future
+sessions.  EIDA applies the ephemeral principle to the \emph{identity layer
+itself}---the layer TLS never touches.
+
+\subsection{One-Time Signature Schemes (Lamport, WOTS)}
+
+One-time signature schemes share the single-use property with ePriPub.
+However, they were designed for post-quantum resistance rather than identity
+isolation, do not address the centralisation problem, and have no isolation
+zone model or stateless CA mechanism.  ePriPub is architecturally distinct:
+its purpose is identity-level forward secrecy, not quantum resistance.
+
+\subsection{Decentralised Identity (DID, W3C)}
+
+The W3C DID standard~\cite{W3CDID} moves identity off centralised registries.
+However, DID does not address per-transaction key isolation, DID keys are
+reused across transactions, and no single-use consent-token primitive exists
+in the DID model.  EIDA is complementary to DID---ePriPub could serve as the
+signing primitive within a DID framework.
+
+% ═══════════════════════════════════════════════════════════════════════════
+\section{Conclusion}
+
+The fundamental vulnerability of current internet security architecture is
+concentration.  When identity verification depends on centralised systems,
+those systems become high-value targets.  A single successful attack exposes
+millions.  This is not an implementation failure---it is an architectural one.
+
+EIDA addresses this at the architectural level by introducing three properties
+that classical PKI does not provide simultaneously:
+\begin{itemize}
+  \item \textbf{Identity-level forward secrecy} --- each transaction uses a
+        unique, derived key pair that is destroyed after use.
+  \item \textbf{Zero \texttt{uPriv} exposure} --- the permanent private key
+        never leaves the hardware-backed isolation zone.
+  \item \textbf{Distributed attack surface} --- there is no central repository
+        of user identity material worth attacking.
+\end{itemize}
+
+The core primitive, ePriPub, achieves these properties by combining
+well-established cryptographic standards---HKDF~\cite{RFC5869} and
+Ed25519~\cite{RFC8032}---in a novel architectural pattern.  No new
+cryptographic assumptions are required.
+
+EIDA does not replace existing infrastructure.  It extends it.  CA systems,
+PKI chains, and existing identity frameworks remain valid---EIDA adds a
+per-transaction isolation layer on top of them.
+
+The shift EIDA proposes is conceptual as much as technical: security should
+not be something done \emph{to} users by centralised authorities.  It should
+be something that lives \emph{with} the user, on the user's device, under the
+user's control.
+
+% ═══════════════════════════════════════════════════════════════════════════
+\bibliographystyle{alpha}
+\begin{thebibliography}{10}
+
+\bibitem{RFC5869}
+H.~Krawczyk and P.~Eronen.
+\newblock {HMAC-based Extract-and-Expand Key Derivation Function (HKDF)}.
+\newblock RFC~5869, Internet Engineering Task Force, May 2010.
+\newblock \url{https://www.rfc-editor.org/rfc/rfc5869}
+
+\bibitem{RFC8032}
+S.~Josefsson and I.~Liusvaara.
+\newblock {Edwards-Curve Digital Signature Algorithm (EdDSA)}.
+\newblock RFC~8032, Internet Engineering Task Force, January 2017.
+\newblock \url{https://www.rfc-editor.org/rfc/rfc8032}
+
+\bibitem{Bernstein2012}
+D.~J.~Bernstein, N.~Duif, T.~Lange, P.~Schwabe, and B.-Y.~Yang.
+\newblock High-speed high-security signatures.
+\newblock \emph{Journal of Cryptographic Engineering}, 2(2):77--89, 2012.
+
+\bibitem{W3CDID}
+{W3C}.
+\newblock {Decentralized Identifiers (DIDs) v1.0}.
+\newblock W3C Recommendation, July 2022.
+\newblock \url{https://www.w3.org/TR/did-core/}
+
+\bibitem{RFC8446}
+E.~Rescorla.
+\newblock {The Transport Layer Security (TLS) Protocol Version 1.3}.
+\newblock RFC~8446, Internet Engineering Task Force, August 2018.
+\newblock \url{https://www.rfc-editor.org/rfc/rfc8446}
+
+\end{thebibliography}
+
+\end{document}
