@@ -207,6 +207,8 @@ The timestamp is included in the HKDF input (uPriv + nonce + timestamp), making 
 3. Reject if outside window (prevents replay)
 4. Use NTP with multiple time sources or hardware RTC for accurate time
 
+**TTL configuration:** Default 5 seconds. Recommended range: 1-5 seconds for LAN/internal deployments, 5-30 seconds for internet-facing deployments. Shorter TTL values provide stronger replay protection but require tighter clock synchronization.
+
 **NTP security:** Consider authenticated NTP (RFC 5905) or GPS time sources for high-security deployments.
 ```
 
@@ -292,7 +294,9 @@ Attacker gains access to CA
 CA stores: no persistent user data, no burned list
 sPriv keys → destroyed after each transaction → not recoverable
 uPriv → never reaches CA → not exposed
-Result: attacker finds nothing of value
+CA_priv → attacker could issue fraudulent certificates
+          (mitigated by hardware security module — HSM — for CA private key)
+Result: attacker finds no user identity material; CA_priv in HSM limits damage
 ```
 
 **Device compromise**
@@ -324,7 +328,7 @@ Result: attack fails
 EIDA's stateless design creates a revocation challenge. Three strategies are supported:
 
 #### Strategy 1: Short TTL + Re-authentication (Default)
-- TTL window: 1-5 seconds
+- TTL window: 5-30 seconds (recommended: 10s for internet, 5s for LAN)
 - No explicit revocation — keys expire naturally
 - Compromised uPriv requires user to re-register with new key pair
 
@@ -362,7 +366,7 @@ EIDA's stateless design creates a revocation challenge. Three strategies are sup
 | uPriv exposure risk | High | None |
 | Replay protection | External | Native |
 | CA breach impact | Critical | Minimal |
-| Forward secrecy | Session-level | Identity-level |
+| Forward secrecy | Session-level | Transaction-level |
 | Centralization | High | None |
 
 ### 6.2 TLS Ephemeral (TLS 1.3)
@@ -404,7 +408,7 @@ GKDP is a derivative of EIDA tailored for Turkish government requirements. Key d
 | CA statefulness | Stateless | Stateful (nonce cache, token hash, Merkle records) |
 | Unlinkability | Full (ePub per transaction) | Limited (BTK sees uPub, accepts correlation risk) |
 | Bootstrapping | Implied | Explicit (physical registration at PTT) |
-| Key derivation | HKDF(uPriv+nonce+ts) | Dilithium3.KeyGen() per session |
+| Key derivation | Derived from uPriv via HKDF | Independent Dilithium3.KeyGen() per session |
 | Adli süreç (court access) | Not defined | Defined: court → BTK → eDevlet chain |
 | Dual-records guarantee | Not defined | Merkle tree root to eDevlet |
 
@@ -418,7 +422,7 @@ The fundamental vulnerability of current internet security architecture is conce
 
 EIDA addresses this at the architectural level by introducing three properties that classical PKI does not provide simultaneously:
 
-- **Identity-level forward secrecy** — each transaction uses a unique, derived key pair that is destroyed after use
+- **Transaction-level forward secrecy** — each transaction uses a unique, derived key pair that is destroyed after use
 - **Zero uPriv exposure** — the permanent private key never leaves the hardware-backed isolation zone
 - **Distributed attack surface** — there is no central repository of user identity material worth attacking
 
